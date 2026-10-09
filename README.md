@@ -1,72 +1,71 @@
-# V2Ray Exporter
+# Xray Exporter
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/wi1dcard/v2ray-exporter)][goreportcard]
-[![Build Status](https://app.travis-ci.com/wi1dcard/v2ray-exporter.svg?branch=master)][build-status]
+[![CI](https://github.com/samssh/xray-exporter/actions/workflows/ci.yml/badge.svg)][ci]
+[![Release](https://img.shields.io/github/v/release/samssh/xray-exporter)][github-releases]
 
-An exporter that collect V2Ray metrics over its [Stats API][stats-api] and export them to Prometheus.
+A Prometheus exporter that collects [Xray-core][xray-core] metrics over its gRPC [Stats API][stats-api].
 
-- [V2Ray Exporter](#v2ray-exporter)
+This project started as a fork of [wi1dcard/v2ray-exporter][upstream].
+
+- [Xray Exporter](#xray-exporter)
   - [Quick Start](#quick-start)
     - [Binaries](#binaries)
-    - [Third-party Packages](#third-party-packages)
-    - [Docker (Recommended)](#docker-recommended)
+    - [Docker](#docker)
     - [Grafana Dashboard](#grafana-dashboard)
   - [Tutorial](#tutorial)
-  - [Digging Deeper](#digging-deeper)
-  - [TODOs](#todos)
+  - [Command Line Options](#command-line-options)
+  - [Metrics](#metrics)
+  - [Development](#development)
   - [Special Thanks](#special-thanks)
   - [License](#license)
 
 ![][grafana-screenshot]
 
-[stats-api]: https://www.v2ray.com/chapter_02/stats.html
-[goreportcard]: https://goreportcard.com/report/github.com/wi1dcard/v2ray-exporter
+[xray-core]: https://github.com/XTLS/Xray-core
+[stats-api]: https://xtls.github.io/en/config/stats.html
+[upstream]: https://github.com/wi1dcard/v2ray-exporter
+[ci]: https://github.com/samssh/xray-exporter/actions/workflows/ci.yml
 [grafana-screenshot]: https://i.loli.net/2020/06/12/KzjOnyu93VEIPiW.png
-[build-status]: https://app.travis-ci.com/github/wi1dcard/v2ray-exporter
 
 ## Quick Start
 
 ### Binaries
 
-The latest binaries are made available on GitHub [releases][github-releases] page:
+Archives for Linux, macOS, FreeBSD and Windows (amd64, arm64, armv7) are published on the [releases][github-releases] page:
 
 ```bash
-wget -O /tmp/v2ray-exporter https://github.com/wi1dcard/v2ray-exporter/releases/latest/download/v2ray-exporter_linux_amd64
-mv /tmp/v2ray-exporter /usr/local/bin/v2ray-exporter
-chmod +x /usr/local/bin/v2ray-exporter
+VERSION=x.y.z  # pick a release
+wget "https://github.com/samssh/xray-exporter/releases/download/v${VERSION}/xray-exporter_${VERSION}_linux_amd64.tar.gz"
+tar -xzf "xray-exporter_${VERSION}_linux_amd64.tar.gz" xray-exporter
+sudo install xray-exporter /usr/local/bin/
 ```
 
-### Third-party Packages
+### Docker
 
-- Arch Linux (@unknowndev233): <https://aur.archlinux.org/packages/v2ray-exporter>
-
-### Docker (Recommended)
-
-You can also find the docker images built automatically by CI from [Docker Hub](https://hub.docker.com/r/wi1dcard/v2ray-exporter). The images are made for multi-arch. You can run it from your Raspberry Pi or any other ARM, ARM64 devices without changing the image name:
+Multi-arch images (amd64, arm64, arm/v7) are published to the GitHub Container Registry:
 
 ```bash
-docker run --rm -it wi1dcard/v2ray-exporter:<TAG>
+docker run --rm -it ghcr.io/samssh/xray-exporter:latest --xray-endpoint "host.docker.internal:54321"
 ```
 
-Please note that `latest` tag is not available. Use `master` instead if you want the latest build of master branch.
+Tags: `latest` and `X.Y.Z` / `X.Y` follow releases, and `master` is built from the tip of the master branch.
 
 ### Grafana Dashboard
 
-A simple Grafana dashboard is also available [here][grafana-dashboard]. Please refer to the [Grafana docs][grafana-importing-dashboard] to get the steps of importing dashboards from JSON files.
-
-Note that the dashboard on [grafana.com][grafana-dashboard-grafana-dot-com] may not be the latest version, please consider downloading the dashboard JSON from the link above.
+A simple Grafana dashboard is available [here][grafana-dashboard]. Please refer to the [Grafana docs][grafana-importing-dashboard] for how to import dashboards from JSON files.
 
 ## Tutorial
 
 Before we start, let's assume you have already set up Prometheus and Grafana.
 
-Firstly, you will need to make sure the API and statistics related features have been enabled in your V2Ray config file. For example:
+First, make sure the API and statistics features are enabled in your Xray config file. For example:
 
 ```json
 {
     "stats": {},
     "api": {
         "tag": "api",
+        "listen": "127.0.0.1:54321",
         "services": [
             "StatsService"
         ]
@@ -87,95 +86,70 @@ Firstly, you will need to make sure the API and statistics related features have
     },
     "inbounds": [
         {
-            "tag": "tcp",
+            "tag": "vless-in",
             "port": 12345,
-            "protocol": "vmess",
+            "protocol": "vless",
             "settings": {
+                "decryption": "none",
                 "clients": [
                     {
                         "email": "foo@example.com",
                         "id": "e731f153-4f31-49d3-9e8f-ff8f396135ef",
-                        "level": 0,
-                        "alterId": 4
+                        "level": 0
                     },
                     {
                         "email": "bar@example.com",
                         "id": "e731f153-4f31-49d3-9e8f-ff8f396135ee",
-                        "level": 0,
-                        "alterId": 4
+                        "level": 0
                     }
                 ]
-            }
-        },
-        {
-            "tag": "api",
-            "listen": "127.0.0.1",
-            "port": 54321,
-            "protocol": "dokodemo-door",
-            "settings": {
-                "address": "127.0.0.1"
             }
         }
     ],
     "outbounds": [
         {
-            "protocol": "freedom",
-            "settings": {}
+            "tag": "direct",
+            "protocol": "freedom"
         }
-    ],
-    "routing": {
-        "rules": [
-            {
-                "inboundTag": [
-                    "api"
-                ],
-                "outboundTag": "api",
-                "type": "field"
-            }
-        ]
-    }
+    ]
 }
 ```
 
-As you can see, we opened two inbounds in the configuration above. The first inbound accepts VMess connections from user `foo@example.com` and `bar@example.com`, and the second one listens port 54321 on localhost and handles the API calls, which is the endpoint that the exporter scrapes. If you'd like to run V2Ray and exporter on different machines, consider use `0.0.0.0` instead of `127.0.0.1` and be careful with the security risks.
+The `api.listen` field makes Xray serve its gRPC API on `127.0.0.1:54321`, which is the endpoint the exporter scrapes. If you'd like to run Xray and the exporter on different machines, listen on a reachable address instead and be careful with the security risks: the API can also be used to change Xray's configuration.
 
-Additionally, you should also enable `stats`, `api`, and `policy` settings, and setup proper routing rules in order to get traffic statistics works. For more information, please visit [The Beginner's Guide of V2Ray][v2ray-beginners-guide].
+Per-user statistics are only collected for clients that have an `email` and use a policy level with `statsUserUplink` / `statsUserDownlink` enabled. For more information, see the Xray docs for [stats][stats-api], [api][xray-api-docs] and [policy][xray-policy-docs].
 
-The next step is to start the exporter:
+Next, start the exporter:
 
 ```bash
-v2ray-exporter --v2ray-endpoint "127.0.0.1:54321"
+xray-exporter --xray-endpoint "127.0.0.1:54321"
 ## Or
-docker run --rm -d wi1dcard/v2ray-exporter:master --v2ray-endpoint "127.0.0.1:54321"
+docker run --rm -d --network host ghcr.io/samssh/xray-exporter:latest --xray-endpoint "127.0.0.1:54321"
 ```
 
-The logs signifies that the exporter started to listening on the default address (`:9550`).
+The logs show that the exporter is listening on the default address (`:9550`):
 
 ```plain
-V2Ray Exporter master-39eb972 (built 2020-04-05T05:32:01Z)
-time="2020-05-11T06:18:09Z" level=info msg="Server is ready to handle incoming scrape requests."
+Xray Exporter 1.0.0-1a2b3c4 (built 2026-10-09T05:32:01Z)
+time="2026-10-09T06:18:09Z" level=info msg="Server is ready to handle incoming scrape requests."
 ```
 
-Use `--listen` option if you'd like to changing the listen address or port. You can now open `http://IP:9550` in your browser:
-
-![browser.png][browser-screenshot]
-
-Click the `Scrape V2Ray Metrics` and the exporter will expose all metrics including V2Ray runtime and statistics data in the Prometheus metrics format, for example:
+Use the `--listen` option to change the listen address or port. Open `http://IP:9550` in your browser and click `Scrape Xray Metrics`, and the exporter will expose Xray's runtime and statistics data in the Prometheus format, for example:
 
 ```
 ...
-# HELP v2ray_up Indicate scrape succeeded or not
-# TYPE v2ray_up gauge
-v2ray_up 1
-# HELP v2ray_uptime_seconds V2Ray uptime in seconds
-# TYPE v2ray_uptime_seconds gauge
-v2ray_uptime_seconds 150624
+# HELP xray_up Indicate scrape succeeded or not
+# TYPE xray_up gauge
+xray_up 1
+# HELP xray_uptime_seconds Xray uptime in seconds
+# TYPE xray_uptime_seconds gauge
+xray_uptime_seconds 150624
 ...
 ```
 
-If `v2ray_up 1` doesn't exist in the response, that means the scrape was failed, please check out the logs (STDOUT or STDERR) of V2Ray Exporter for more detailed information.
+The exporter starts even when Xray is not reachable yet. If `xray_up` is `0`, the scrape failed; check the exporter logs (STDERR) for details.
 
-We have the metrics exposed. Now let Prometheus scrapes these data points and visualize them with Grafana. Here is an example Promtheus configuration:
+Now let Prometheus scrape these metrics. Here is an example Prometheus configuration:
 
 ```yaml
 global:
@@ -183,7 +157,7 @@ global:
   scrape_timeout: 5s
 
 scrape_configs:
-  - job_name: v2ray
+  - job_name: xray
     metrics_path: /scrape
     static_configs:
       - targets: [IP:9550]
@@ -191,56 +165,79 @@ scrape_configs:
 
 To learn more about Prometheus, please visit the [official docs][prometheus-docs].
 
-## Digging Deeper
+## Command Line Options
 
-The exporter doesn't retain the original metric names from V2Ray intentionally. You may find out why in the [comments][explaination-of-metric-names].
+```
+Usage:
+  xray-exporter [OPTIONS]
 
-For users who do not really care about the internal changes, but only need a mapping table, here it is:
+Application Options:
+  -l, --listen=[ADDR]:PORT         Listen address (default: :9550)
+  -m, --metrics-path=PATH          Metrics path (default: /scrape)
+  -e, --xray-endpoint=HOST:PORT    Xray API endpoint (default: 127.0.0.1:8080)
+  -t, --scrape-timeout=N           The timeout in seconds for every individual
+                                   scrape (default: 3)
+      --version                    Display the version and exit
+```
 
-| Runtime Metric   | Exposed Metric                     |
-| :--------------- | :--------------------------------- |
-| `uptime`         | `v2ray_uptime_seconds`             |
-| `num_goroutine`  | `v2ray_goroutines`                 |
-| `alloc`          | `v2ray_memstats_alloc_bytes`       |
-| `total_alloc`    | `v2ray_memstats_alloc_bytes_total` |
-| `sys`            | `v2ray_memstats_sys_bytes`         |
-| `mallocs`        | `v2ray_memstats_mallocs_total`     |
-| `frees`          | `v2ray_memstats_frees_total`       |
-| `live_objects`   | Removed. See the appendix below.   |
-| `num_gc`         | `v2ray_memstats_num_gc`            |
-| `pause_total_ns` | `v2ray_memstats_pause_total_ns`    |
+Xray metrics are served on `--metrics-path` (`/scrape` by default). The exporter's own Go runtime metrics are served on `/metrics`.
 
-| Statistic Metric                          | Exposed Metric                                                              |
-| :---------------------------------------- | :-------------------------------------------------------------------------- |
-| `inbound>>>tag-name>>>traffic>>>uplink`   | `v2ray_traffic_uplink_bytes_total{dimension="inbound",target="tag-name"}`   |
-| `inbound>>>tag-name>>>traffic>>>downlink` | `v2ray_traffic_downlink_bytes_total{dimension="inbound",target="tag-name"}` |
-| `outbound>>>tag-name>>>traffic>>>uplink`   | `v2ray_traffic_uplink_bytes_total{dimension="outbound",target="tag-name"}`   |
-| `outbound>>>tag-name>>>traffic>>>downlink` | `v2ray_traffic_downlink_bytes_total{dimension="outbound",target="tag-name"}` |
-| `user>>>user-email>>traffic>>>uplink`     | `v2ray_traffic_uplink_bytes_total{dimension="user",target="user-email"}`    |
-| `user>>>user-email>>>traffic>>>downlink`  | `v2ray_traffic_downlink_bytes_total{dimension="user",target="user-email"}`  |
-| ...                                       | ...                                                                         |
+## Metrics
 
-- The value of `live_objects` can be calculated by `memstats_mallocs_total - memstats_frees_total`.
+The exporter intentionally doesn't keep Xray's original metric names, and follows the Prometheus [naming conventions][prometheus-naming] instead.
 
-## TODOs
+| Runtime Metric   | Exposed Metric                    |
+| :--------------- | :-------------------------------- |
+| `uptime`         | `xray_uptime_seconds`             |
+| `num_goroutine`  | `xray_goroutines`                 |
+| `alloc`          | `xray_memstats_alloc_bytes`       |
+| `total_alloc`    | `xray_memstats_alloc_bytes_total` |
+| `sys`            | `xray_memstats_sys_bytes`         |
+| `mallocs`        | `xray_memstats_mallocs_total`     |
+| `frees`          | `xray_memstats_frees_total`       |
+| `live_objects`   | Removed. See the note below.      |
+| `num_gc`         | `xray_memstats_num_gc`            |
+| `pause_total_ns` | `xray_memstats_pause_total_ns`    |
 
-- GitHub Action
+| Statistic Metric                           | Exposed Metric                                                             |
+| :----------------------------------------- | :------------------------------------------------------------------------- |
+| `inbound>>>tag-name>>>traffic>>>uplink`    | `xray_traffic_uplink_bytes_total{dimension="inbound",target="tag-name"}`    |
+| `inbound>>>tag-name>>>traffic>>>downlink`  | `xray_traffic_downlink_bytes_total{dimension="inbound",target="tag-name"}`  |
+| `outbound>>>tag-name>>>traffic>>>uplink`   | `xray_traffic_uplink_bytes_total{dimension="outbound",target="tag-name"}`   |
+| `outbound>>>tag-name>>>traffic>>>downlink` | `xray_traffic_downlink_bytes_total{dimension="outbound",target="tag-name"}` |
+| `user>>>user-email>>>traffic>>>uplink`     | `xray_traffic_uplink_bytes_total{dimension="user",target="user-email"}`     |
+| `user>>>user-email>>>traffic>>>downlink`   | `xray_traffic_downlink_bytes_total{dimension="user",target="user-email"}`   |
+
+The exporter also exposes `xray_up`, `xray_scrape_duration_seconds` and `xray_scrapes_total` about the scrapes themselves.
+
+- The value of `live_objects` can be calculated with `xray_memstats_mallocs_total - xray_memstats_frees_total`.
+
+## Development
+
+```bash
+make test      # go test -race ./...
+make lint      # golangci-lint run ./...
+make build     # builds dist/xray-exporter
+make snapshot  # cross-platform release archives via GoReleaser, without publishing
+make docker    # builds the container image locally
+```
+
+Pushing a `v*` tag publishes release archives with GoReleaser and multi-arch images to GHCR. Every push to `master` publishes the `master` image.
 
 ## Special Thanks
 
+- <https://github.com/wi1dcard/v2ray-exporter>
 - <https://github.com/schweikert/fping-exporter>
 - <https://github.com/oliver006/redis_exporter>
-- <https://github.com/roboll/helmfile>
 
 ## License
 
 MIT
 
-[github-releases]: https://github.com/wi1dcard/v2ray-exporter/releases
-[v2ray-beginners-guide]: https://guide.v2fly.org/en_US/advanced/traffic.html
-[browser-screenshot]: https://i.loli.net/2020/01/11/ZVtNEU8iqMrFGKm.png
+[github-releases]: https://github.com/samssh/xray-exporter/releases
+[xray-api-docs]: https://xtls.github.io/en/config/api.html
+[xray-policy-docs]: https://xtls.github.io/en/config/policy.html
 [prometheus-docs]: https://prometheus.io/docs/prometheus/latest/configuration/configuration/
+[prometheus-naming]: https://prometheus.io/docs/practices/naming/
 [grafana-dashboard]: ./dashboard.json
-[grafana-dashboard-grafana-dot-com]: https://grafana.com/grafana/dashboards/11545
-[grafana-importing-dashboard]: https://grafana.com/docs/grafana/latest/reference/export_import/#importing-a-dashboard
-[explaination-of-metric-names]: https://github.com/wi1dcard/v2ray-exporter/blob/110e82dfefb1b51f4da3966ddd1945b5d0dac203/exporter.go#L134
+[grafana-importing-dashboard]: https://grafana.com/docs/grafana/latest/dashboards/build-dashboards/import-dashboards/
