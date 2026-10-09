@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/alecthomas/kingpin/v2"
@@ -42,8 +43,12 @@ func main() {
 			def = "true"
 		}
 		collectorFlags[c.Name] = app.Flag("collector."+c.Name, fmt.Sprintf("Enable the %s collector: %s (default: %s)", c.Name, c.Help, def)).
-			Default(def).Bool()
+			Envar("XRAY_EXPORTER_COLLECTOR_" + strings.ToUpper(c.Name)).Default(def).Bool()
 	}
+	onlineIPs := app.Flag("collector.online.ips", "Export one series per online user and IP (high cardinality)").
+		Envar("XRAY_EXPORTER_COLLECTOR_ONLINE_IPS").Bool()
+	balancerTags := app.Flag("collector.balancer.tag", "Tags of balancers to report on, comma-separated or repeated").
+		Envar("XRAY_EXPORTER_COLLECTOR_BALANCER_TAG").PlaceHolder("TAG").Strings()
 
 	kingpin.MustParse(app.Parse(os.Args[1:]))
 
@@ -64,6 +69,8 @@ func main() {
 		Endpoint:      *endpoint,
 		ScrapeTimeout: time.Duration(*scrapeTimeoutInSeconds) * time.Second,
 		Collectors:    enabled,
+		OnlineIPs:     *onlineIPs,
+		BalancerTags:  splitCommas(*balancerTags),
 	})
 	if err != nil {
 		logrus.Fatal(err)
@@ -92,4 +99,17 @@ func main() {
 		_ = exporter.Close()
 		os.Exit(1)
 	}
+}
+
+// splitCommas splits each value on commas and drops empty parts.
+func splitCommas(values []string) []string {
+	var out []string
+	for _, v := range values {
+		for _, part := range strings.Split(v, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				out = append(out, part)
+			}
+		}
+	}
+	return out
 }

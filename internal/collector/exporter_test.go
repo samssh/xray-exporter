@@ -11,12 +11,18 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/test/bufconn"
 
+	observatory "github.com/samssh/xray-exporter/internal/xrayapi/app/observatory/command"
+	proxyman "github.com/samssh/xray-exporter/internal/xrayapi/app/proxyman/command"
 	"github.com/samssh/xray-exporter/internal/xrayapi/app/stats/command"
 )
 
 type fakeStatsServer struct {
 	command.UnimplementedStatsServiceServer
 	stats []*command.Stat
+	// users are the online users, as email -> IP -> last seen. They are served
+	// through GetUsersStats, or through the older per-user calls when legacy is set.
+	users  map[string]map[string]int64
+	legacy bool
 }
 
 func (s *fakeStatsServer) QueryStats(context.Context, *command.QueryStatsRequest) (*command.QueryStatsResponse, error) {
@@ -154,11 +160,23 @@ func TestAllCollectorsDescribeTheirMetrics(t *testing.T) {
 	for _, c := range collectors {
 		all = append(all, c.Name)
 	}
-	e := newTestExporter(t, withStats(&fakeStatsServer{stats: []*command.Stat{
-		{Name: "outbound>>>direct>>>traffic>>>uplink", Value: 1},
-	}}), Options{Collectors: all})
+	e := newTestExporter(t, func(s *grpc.Server) {
+		withStats(&fakeStatsServer{
+			stats: []*command.Stat{{Name: "outbound>>>direct>>>traffic>>>uplink", Value: 1}},
+			users: map[string]map[string]int64{"foo@example.com": {"1.1.1.1": 1700000000}},
+		})(s)
+		withRouting(s)
+		proxyman.RegisterHandlerServiceServer(s, fakeHandlerServer{})
+		observatory.RegisterObservatoryServiceServer(s, fakeObservatoryServer{})
+	}, Options{Collectors: all, OnlineIPs: true, BalancerTags: []string{"least-ping", "overridden"}})
 
-	if _, err := e.registry.Gather(); err != nil {
+	expected := `
+# HELP xray_up Whether all enabled collectors succeeded
+# TYPE xray_up gauge
+xray_up 1
+`
+	// GatherAndCompare fails on any metric that wasn't described.
+	if err := testutil.GatherAndCompare(e.registry, strings.NewReader(expected), "xray_up"); err != nil {
 		t.Fatal(err)
 	}
 }

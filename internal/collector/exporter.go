@@ -38,6 +38,10 @@ type Info struct {
 var collectors = []Info{
 	{"traffic", "Traffic counters per inbound, outbound and user (StatsService)", true, newTrafficCollector},
 	{"runtime", "Xray uptime and Go runtime stats (StatsService)", true, newRuntimeCollector},
+	{"online", "Online users and their IPs (StatsService, needs statsUserOnline in the policy)", false, newOnlineCollector},
+	{"handler", "Users per inbound and outbound protocols (HandlerService)", false, newHandlerCollector},
+	{"observatory", "Outbound health from observatory or burstObservatory (ObservatoryService)", false, newObservatoryCollector},
+	{"balancer", "Outbounds selected by balancers (RoutingService, needs --collector.balancer.tag)", false, newBalancerCollector},
 }
 
 // All returns every available collector.
@@ -53,6 +57,10 @@ type Options struct {
 	ScrapeTimeout time.Duration
 	// Collectors are the names of the collectors to run.
 	Collectors []string
+	// OnlineIPs makes the online collector export one series per user and IP.
+	OnlineIPs bool
+	// BalancerTags are the balancers the balancer collector reports on.
+	BalancerTags []string
 	// DialOptions are added to the gRPC client's options.
 	DialOptions []grpc.DialOption
 }

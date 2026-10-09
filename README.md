@@ -182,7 +182,18 @@ Flags:
       --log.level=info          Log level: debug, info, warn or error ($XRAY_EXPORTER_LOG_LEVEL)
       --[no-]collector.traffic  Enable the traffic collector (default: true)
       --[no-]collector.runtime  Enable the runtime collector (default: true)
+      --[no-]collector.online   Enable the online collector (default: false)
+      --[no-]collector.handler  Enable the handler collector (default: false)
+      --[no-]collector.observatory
+                                Enable the observatory collector (default: false)
+      --[no-]collector.balancer Enable the balancer collector (default: false)
+      --[no-]collector.online.ips
+                                Export one series per online user and IP (high cardinality)
+      --collector.balancer.tag=TAG ...
+                                Tags of balancers to report on, comma-separated or repeated
 ```
+
+Every flag can also be set with an environment variable, shown in `xray-exporter --help`. Collector flags use `XRAY_EXPORTER_COLLECTOR_<NAME>`, for example `XRAY_EXPORTER_COLLECTOR_ONLINE=true`.
 
 Xray metrics are served on `--metrics-path` (`/scrape` by default). The exporter's own Go runtime metrics are served on `/metrics`.
 
@@ -190,12 +201,34 @@ Xray metrics are served on `--metrics-path` (`/scrape` by default). The exporter
 
 Each group of metrics comes from a collector that can be turned on with `--collector.<name>` or off with `--no-collector.<name>`. Each collector needs the matching service in Xray's `api.services`.
 
-| Collector | Default | Xray service   | Metrics                                         |
-| :-------- | :------ | :------------- | :---------------------------------------------- |
-| `traffic` | on      | `StatsService` | Traffic counters per inbound, outbound and user |
-| `runtime` | on      | `StatsService` | Xray uptime and Go runtime stats                |
+| Collector     | Default | Xray service         | Metrics                                                    |
+| :------------ | :------ | :------------------- | :--------------------------------------------------------- |
+| `traffic`     | on      | `StatsService`       | Traffic counters per inbound, outbound and user            |
+| `runtime`     | on      | `StatsService`       | Xray uptime and Go runtime stats                           |
+| `online`      | off     | `StatsService`       | Online users and the number of IPs each one is online from |
+| `handler`     | off     | `HandlerService`     | Users per inbound and the protocol of each outbound        |
+| `observatory` | off     | `ObservatoryService` | Outbound health from `observatory` or `burstObservatory`   |
+| `balancer`    | off     | `RoutingService`     | Outbounds selected by balancers                            |
 
 If a collector fails, for example because its service isn't enabled in Xray, the other collectors still report their metrics and the exporter logs a warning.
+
+To enable everything, list all the services in Xray's config:
+
+```json
+"api": {
+    "tag": "api",
+    "listen": "127.0.0.1:54321",
+    "services": ["StatsService", "HandlerService", "ObservatoryService", "RoutingService"]
+}
+```
+
+and start the exporter with:
+
+```bash
+xray-exporter --xray-endpoint "127.0.0.1:54321" \
+  --collector.online --collector.handler --collector.observatory \
+  --collector.balancer --collector.balancer.tag "my-balancer"
+```
 
 ## Metrics
 
@@ -239,6 +272,65 @@ The exporter intentionally doesn't keep Xray's original metric names, and follow
 | `user>>>user-email>>>traffic>>>uplink`     | `xray_traffic_uplink_bytes_total{dimension="user",target="user-email"}`     |
 | `user>>>user-email>>>traffic>>>downlink`   | `xray_traffic_downlink_bytes_total{dimension="user",target="user-email"}`   |
 
+### `online` collector
+
+Online users are only tracked when the user's policy level has `statsUserOnline` enabled, and the user has an `email`:
+
+```json
+"policy": {
+    "levels": {
+        "0": {
+            "statsUserUplink": true,
+            "statsUserDownlink": true,
+            "statsUserOnline": true
+        }
+    }
+}
+```
+
+| Metric                                                          | Description                                                     |
+| :-------------------------------------------------------------- | :-------------------------------------------------------------- |
+| `xray_online_users`                                             | Number of users with at least one online IP                     |
+| `xray_user_online_ips{user="..."}`                              | Number of IPs the user is online from                           |
+| `xray_user_online_ip_last_seen_timestamp_seconds{user,ip}`      | When the user last opened a connection from the IP, in Unix time |
+
+- A user's series disappear when they go offline.
+- `xray_user_online_ip_last_seen_timestamp_seconds` is only exported with `--collector.online.ips`, because it creates one series per user and IP.
+- Xray only counts connections that are open, and ignores connections from localhost.
+- On Xray v26.4.13 and newer, the collector reads everything with one API call. On older versions it makes one call per online user. Xray v26.1.13 or newer is required.
+
+### `handler` collector
+
+| Metric                                      | Description                                                          |
+| :------------------------------------------ | :------------------------------------------------------------------- |
+| `xray_inbound_users{inbound="..."}`         | Number of users configured on the inbound. Not the number online.    |
+| `xray_outbound_info{outbound,protocol}`     | Always `1`. Lists the outbounds and their protocols, such as `vless` |
+
+Inbounds without users, such as `dokodemo-door`, are skipped.
+
+### `observatory` collector
+
+Works with both [`observatory`][xray-observatory-docs] and [`burstObservatory`][xray-burst-observatory-docs]. Xray needs one of them configured to start `ObservatoryService`.
+
+| Metric                                                          | Description                                                                     |
+| :-------------------------------------------------------------- | :------------------------------------------------------------------------------ |
+| `xray_observatory_outbound_up{outbound="..."}`                  | `1` if the outbound's last probe succeeded                                      |
+| `xray_observatory_outbound_delay_seconds{outbound="..."}`       | Probe delay. With `burstObservatory`, the average RTT. Only set while up        |
+| `xray_observatory_outbound_last_seen_timestamp_seconds{...}`    | When a probe last succeeded, in Unix time (`observatory` only)                  |
+| `xray_observatory_outbound_last_try_timestamp_seconds{...}`     | When the outbound was last probed, in Unix time (`observatory` only)            |
+| `xray_observatory_health_ping_probes{outbound="..."}`           | Probes in the sampling window (`burstObservatory` only)                         |
+| `xray_observatory_health_ping_failed_probes{outbound="..."}`    | Failed probes in the sampling window (`burstObservatory` only)                  |
+| `xray_observatory_health_ping_rtt_{average,min,max,deviation}_seconds{...}` | RTT stats in the sampling window (`burstObservatory` only, and only if a probe succeeded) |
+
+### `balancer` collector
+
+Xray's API can't list balancers, so name them with `--collector.balancer.tag`.
+
+| Metric                                         | Description                                                                         |
+| :--------------------------------------------- | :---------------------------------------------------------------------------------- |
+| `xray_balancer_selected{balancer,outbound}`    | Always `1`. The outbounds the strategy currently prefers (`leastPing` and `leastLoad` only) |
+| `xray_balancer_override{balancer,outbound}`    | Always `1`. The outbound the balancer was manually overridden to, if any            |
+
 ## Development
 
 ```bash
@@ -267,6 +359,8 @@ MIT, except for the files in [`proto/`](proto) and [`internal/xrayapi/`](interna
 [github-releases]: https://github.com/samssh/xray-exporter/releases
 [xray-api-docs]: https://xtls.github.io/en/config/api.html
 [xray-policy-docs]: https://xtls.github.io/en/config/policy.html
+[xray-observatory-docs]: https://xtls.github.io/en/config/observatory.html
+[xray-burst-observatory-docs]: https://xtls.github.io/en/config/observatory.html#burstobservatoryobject
 [prometheus-docs]: https://prometheus.io/docs/prometheus/latest/configuration/configuration/
 [prometheus-naming]: https://prometheus.io/docs/practices/naming/
 [grafana-dashboard]: ./dashboard.json
