@@ -14,6 +14,7 @@ This project started as a fork of [wi1dcard/v2ray-exporter][upstream].
     - [Grafana Dashboard](#grafana-dashboard)
   - [Tutorial](#tutorial)
   - [Command Line Options](#command-line-options)
+    - [Collectors](#collectors)
   - [Metrics](#metrics)
   - [Development](#development)
   - [Special Thanks](#special-thanks)
@@ -138,7 +139,7 @@ Use the `--listen` option to change the listen address or port. Open `http://IP:
 
 ```
 ...
-# HELP xray_up Indicate scrape succeeded or not
+# HELP xray_up Whether all enabled collectors succeeded
 # TYPE xray_up gauge
 xray_up 1
 # HELP xray_uptime_seconds Xray uptime in seconds
@@ -147,7 +148,7 @@ xray_uptime_seconds 150624
 ...
 ```
 
-The exporter starts even when Xray is not reachable yet. If `xray_up` is `0`, the scrape failed; check the exporter logs (STDERR) for details.
+The exporter starts even when Xray is not reachable yet. If `xray_up` is `0`, at least one collector failed; `xray_collector_up` shows which one, and the exporter logs (STDERR) say why.
 
 Now let Prometheus scrape these metrics. Here is an example Prometheus configuration:
 
@@ -168,23 +169,49 @@ To learn more about Prometheus, please visit the [official docs][prometheus-docs
 ## Command Line Options
 
 ```
-Usage:
-  xray-exporter [OPTIONS]
+usage: xray-exporter [<flags>]
 
-Application Options:
-  -l, --listen=[ADDR]:PORT         Listen address (default: :9550)
-  -m, --metrics-path=PATH          Metrics path (default: /scrape)
-  -e, --xray-endpoint=HOST:PORT    Xray API endpoint (default: 127.0.0.1:8080)
-  -t, --scrape-timeout=N           The timeout in seconds for every individual
-                                   scrape (default: 3)
-      --version                    Display the version and exit
+Flags:
+  -h, --[no-]help               Show context-sensitive help.
+      --[no-]version            Show application version.
+  -l, --listen=":9550"          Listen address ($XRAY_EXPORTER_LISTEN)
+  -m, --metrics-path="/scrape"  Path that serves Xray metrics ($XRAY_EXPORTER_METRICS_PATH)
+  -e, --xray-endpoint="127.0.0.1:8080"
+                                Xray API endpoint ($XRAY_EXPORTER_XRAY_ENDPOINT)
+  -t, --scrape-timeout=3        The timeout in seconds for every individual scrape ($XRAY_EXPORTER_SCRAPE_TIMEOUT)
+      --log.level=info          Log level: debug, info, warn or error ($XRAY_EXPORTER_LOG_LEVEL)
+      --[no-]collector.traffic  Enable the traffic collector (default: true)
+      --[no-]collector.runtime  Enable the runtime collector (default: true)
 ```
 
 Xray metrics are served on `--metrics-path` (`/scrape` by default). The exporter's own Go runtime metrics are served on `/metrics`.
 
+### Collectors
+
+Each group of metrics comes from a collector that can be turned on with `--collector.<name>` or off with `--no-collector.<name>`. Each collector needs the matching service in Xray's `api.services`.
+
+| Collector | Default | Xray service   | Metrics                                         |
+| :-------- | :------ | :------------- | :---------------------------------------------- |
+| `traffic` | on      | `StatsService` | Traffic counters per inbound, outbound and user |
+| `runtime` | on      | `StatsService` | Xray uptime and Go runtime stats                |
+
+If a collector fails, for example because its service isn't enabled in Xray, the other collectors still report their metrics and the exporter logs a warning.
+
 ## Metrics
 
 The exporter intentionally doesn't keep Xray's original metric names, and follows the Prometheus [naming conventions][prometheus-naming] instead.
+
+### Scrape health
+
+| Metric                                             | Description                                  |
+| :------------------------------------------------- | :------------------------------------------- |
+| `xray_up`                                          | `1` if all enabled collectors succeeded      |
+| `xray_collector_up{collector="..."}`               | `1` if the collector succeeded               |
+| `xray_collector_duration_seconds{collector="..."}` | How long the collector took                  |
+| `xray_scrape_duration_seconds`                     | How long the whole scrape took               |
+| `xray_scrapes_total`                               | Number of scrapes since the exporter started |
+
+### `runtime` collector
 
 | Runtime Metric   | Exposed Metric                    |
 | :--------------- | :-------------------------------- |
@@ -199,6 +226,10 @@ The exporter intentionally doesn't keep Xray's original metric names, and follow
 | `num_gc`         | `xray_memstats_num_gc`            |
 | `pause_total_ns` | `xray_memstats_pause_total_ns`    |
 
+- The value of `live_objects` can be calculated with `xray_memstats_mallocs_total - xray_memstats_frees_total`.
+
+### `traffic` collector
+
 | Statistic Metric                           | Exposed Metric                                                             |
 | :----------------------------------------- | :------------------------------------------------------------------------- |
 | `inbound>>>tag-name>>>traffic>>>uplink`    | `xray_traffic_uplink_bytes_total{dimension="inbound",target="tag-name"}`    |
@@ -208,19 +239,18 @@ The exporter intentionally doesn't keep Xray's original metric names, and follow
 | `user>>>user-email>>>traffic>>>uplink`     | `xray_traffic_uplink_bytes_total{dimension="user",target="user-email"}`     |
 | `user>>>user-email>>>traffic>>>downlink`   | `xray_traffic_downlink_bytes_total{dimension="user",target="user-email"}`   |
 
-The exporter also exposes `xray_up`, `xray_scrape_duration_seconds` and `xray_scrapes_total` about the scrapes themselves.
-
-- The value of `live_objects` can be calculated with `xray_memstats_mallocs_total - xray_memstats_frees_total`.
-
 ## Development
 
 ```bash
 make test      # go test -race ./...
 make lint      # golangci-lint run ./...
 make build     # builds dist/xray-exporter
+make proto     # re-fetches Xray's API protos and regenerates internal/xrayapi
 make snapshot  # cross-platform release archives via GoReleaser, without publishing
 make docker    # builds the container image locally
 ```
+
+The exporter talks to Xray through Go code generated from Xray's own `.proto` files, pinned to the version in [`proto/XRAY_VERSION`](proto/XRAY_VERSION). To move to a newer Xray API, run `make proto XRAY_VERSION=vX.Y.Z` (needs `protoc`) and commit the result.
 
 Pushing a `v*` tag publishes release archives with GoReleaser and multi-arch images to GHCR. Every push to `master` publishes the `master` image.
 
@@ -232,7 +262,7 @@ Pushing a `v*` tag publishes release archives with GoReleaser and multi-arch ima
 
 ## License
 
-MIT
+MIT, except for the files in [`proto/`](proto) and [`internal/xrayapi/`](internal/xrayapi), which are copied or generated from [Xray-core][xray-core] and are licensed under the [MPL-2.0](proto/LICENSE).
 
 [github-releases]: https://github.com/samssh/xray-exporter/releases
 [xray-api-docs]: https://xtls.github.io/en/config/api.html

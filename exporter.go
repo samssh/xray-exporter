@@ -3,70 +3,102 @@ package main
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
-	// Xray also serves StatsService under its old V2Ray name, so the v2fly stubs work against it.
-	"github.com/v2fly/v2ray-core/v4/app/stats/command"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 const namespace = "xray"
 
-type Exporter struct {
-	sync.Mutex
-	endpoint           string
-	scrapeTimeout      time.Duration
-	registry           *prometheus.Registry
-	totalScrapes       prometheus.Counter
-	metricDescriptions map[string]*prometheus.Desc
-	conn               *grpc.ClientConn
+// collector gathers one group of metrics from the Xray API.
+type collector interface {
+	Describe(ch chan<- *prometheus.Desc)
+	// Collect sends metrics to ch, and returns an error if the data could not be fetched.
+	Collect(ctx context.Context, ch chan<- prometheus.Metric) error
 }
 
-// NewExporter creates an exporter for the Xray API at endpoint. The gRPC
-// connection is established lazily, so Xray does not need to be running yet.
-func NewExporter(endpoint string, scrapeTimeout time.Duration, dialOpts ...grpc.DialOption) (*Exporter, error) {
-	e := Exporter{
-		endpoint:      endpoint,
-		scrapeTimeout: scrapeTimeout,
-		registry:      prometheus.NewRegistry(),
+type collectorInfo struct {
+	name             string
+	help             string
+	enabledByDefault bool
+	new              func(conn *grpc.ClientConn) collector
+}
 
-		totalScrapes: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: namespace,
-			Name:      "scrapes_total",
-			Help:      "Total number of scrapes performed",
-		}),
-	}
+// collectors lists every available collector, in the order they are documented.
+var collectors = []collectorInfo{
+	{"traffic", "Traffic counters per inbound, outbound and user (StatsService)", true, newTrafficCollector},
+	{"runtime", "Xray uptime and Go runtime stats (StatsService)", true, newRuntimeCollector},
+}
 
-	e.metricDescriptions = map[string]*prometheus.Desc{}
+var (
+	upDesc = prometheus.NewDesc(prometheus.BuildFQName(namespace, "", "up"),
+		"Whether all enabled collectors succeeded", nil, nil)
+	scrapeDurationDesc = prometheus.NewDesc(prometheus.BuildFQName(namespace, "", "scrape_duration_seconds"),
+		"Scrape duration in seconds", nil, nil)
+	collectorUpDesc = prometheus.NewDesc(prometheus.BuildFQName(namespace, "collector", "up"),
+		"Whether the collector succeeded", []string{"collector"}, nil)
+	collectorDurationDesc = prometheus.NewDesc(prometheus.BuildFQName(namespace, "collector", "duration_seconds"),
+		"Collector duration in seconds", []string{"collector"}, nil)
+)
 
-	for k, desc := range map[string]struct {
-		txt  string
-		lbls []string
-	}{
-		"up":                           {txt: "Indicate scrape succeeded or not"},
-		"scrape_duration_seconds":      {txt: "Scrape duration in seconds"},
-		"uptime_seconds":               {txt: "Xray uptime in seconds"},
-		"traffic_uplink_bytes_total":   {txt: "Number of transmitted bytes", lbls: []string{"dimension", "target"}},
-		"traffic_downlink_bytes_total": {txt: "Number of received bytes", lbls: []string{"dimension", "target"}},
-	} {
-		e.metricDescriptions[k] = e.newMetricDescr(k, desc.txt, desc.lbls)
-	}
+type Exporter struct {
+	sync.Mutex
+	scrapeTimeout time.Duration
+	registry      *prometheus.Registry
+	totalScrapes  prometheus.Counter
+	conn          *grpc.ClientConn
+	collectors    map[string]collector
+}
 
+// NewExporter creates an exporter for the Xray API at endpoint that runs the
+// named collectors. The gRPC connection is established lazily, so Xray does
+// not need to be running yet.
+func NewExporter(endpoint string, scrapeTimeout time.Duration, enabled []string, dialOpts ...grpc.DialOption) (*Exporter, error) {
 	dialOpts = append([]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, dialOpts...)
 	conn, err := grpc.NewClient(endpoint, dialOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gRPC client for %q: %w", endpoint, err)
 	}
-	e.conn = conn
+
+	e := Exporter{
+		scrapeTimeout: scrapeTimeout,
+		registry:      prometheus.NewRegistry(),
+		totalScrapes: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "scrapes_total",
+			Help:      "Total number of scrapes performed",
+		}),
+		conn:       conn,
+		collectors: map[string]collector{},
+	}
+
+	for _, name := range enabled {
+		info, ok := findCollector(name)
+		if !ok {
+			_ = conn.Close()
+			return nil, fmt.Errorf("unknown collector %q", name)
+		}
+		e.collectors[name] = info.new(conn)
+	}
 
 	e.registry.MustRegister(&e)
 
 	return &e, nil
+}
+
+func findCollector(name string) (collectorInfo, bool) {
+	for _, c := range collectors {
+		if c.name == name {
+			return c, true
+		}
+	}
+	return collectorInfo{}, false
 }
 
 // Close releases the underlying gRPC connection.
@@ -74,123 +106,69 @@ func (e *Exporter) Close() error {
 	return e.conn.Close()
 }
 
+func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
+	ch <- upDesc
+	ch <- scrapeDurationDesc
+	ch <- collectorUpDesc
+	ch <- collectorDurationDesc
+	ch <- e.totalScrapes.Desc()
+
+	for _, c := range e.collectors {
+		c.Describe(ch)
+	}
+}
+
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	e.Lock()
 	defer e.Unlock()
 	e.totalScrapes.Inc()
 
-	start := time.Now().UnixNano()
-
-	var up float64 = 1
-	if err := e.scrapeXray(ch); err != nil {
-		up = 0
-		logrus.Warnf("Scrape failed: %s", err)
-	}
-
-	e.registerConstMetricGauge(ch, "up", up)
-	e.registerConstMetricGauge(ch, "scrape_duration_seconds", float64(time.Now().UnixNano()-start)/1000000000)
-
-	ch <- e.totalScrapes
-}
-
-func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
-	for _, desc := range e.metricDescriptions {
-		ch <- desc
-	}
-
-	ch <- e.totalScrapes.Desc()
-}
-
-func (e *Exporter) scrapeXray(ch chan<- prometheus.Metric) error {
+	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), e.scrapeTimeout)
 	defer cancel()
 
-	client := command.NewStatsServiceClient(e.conn)
-
-	if err := e.scrapeXraySysMetrics(ctx, ch, client); err != nil {
-		return err
+	var (
+		wg     sync.WaitGroup
+		mu     sync.Mutex
+		failed bool
+	)
+	for name, c := range e.collectors {
+		wg.Go(func() {
+			ok := e.runCollector(ctx, name, c, ch)
+			if !ok {
+				mu.Lock()
+				failed = true
+				mu.Unlock()
+			}
+		})
 	}
+	wg.Wait()
 
-	if err := e.scrapeXrayMetrics(ctx, ch, client); err != nil {
-		return err
+	up := 1.0
+	if failed {
+		up = 0
 	}
-
-	return nil
+	ch <- prometheus.MustNewConstMetric(upDesc, prometheus.GaugeValue, up)
+	ch <- prometheus.MustNewConstMetric(scrapeDurationDesc, prometheus.GaugeValue, time.Since(start).Seconds())
+	ch <- e.totalScrapes
 }
 
-func (e *Exporter) scrapeXrayMetrics(ctx context.Context, ch chan<- prometheus.Metric, client command.StatsServiceClient) error {
-	resp, err := client.QueryStats(ctx, &command.QueryStatsRequest{Reset_: false})
-	if err != nil {
-		return fmt.Errorf("failed to get stats: %w", err)
-	}
+func (e *Exporter) runCollector(ctx context.Context, name string, c collector, ch chan<- prometheus.Metric) bool {
+	start := time.Now()
+	err := c.Collect(ctx, ch)
+	duration := time.Since(start).Seconds()
 
-	for _, s := range resp.GetStat() {
-		// example value: inbound>>>socks-proxy>>>traffic>>>uplink
-		p := strings.Split(s.GetName(), ">>>")
-		if len(p) != 4 {
-			logrus.Debugf("Skipping stat with unexpected name: %q", s.GetName())
-			continue
+	up := 1.0
+	if err != nil {
+		up = 0
+		if status.Code(err) == codes.Unimplemented {
+			err = fmt.Errorf("%w (is the service listed in Xray's api.services, and is Xray new enough?)", err)
 		}
-		metric := p[2] + "_" + p[3] + "_bytes_total"
-		dimension := p[0]
-		target := p[1]
-
-		e.registerConstMetricCounter(ch, metric, float64(s.GetValue()), dimension, target)
+		logrus.Warnf("Collector %q failed: %s", name, err)
 	}
 
-	return nil
-}
+	ch <- prometheus.MustNewConstMetric(collectorUpDesc, prometheus.GaugeValue, up, name)
+	ch <- prometheus.MustNewConstMetric(collectorDurationDesc, prometheus.GaugeValue, duration, name)
 
-func (e *Exporter) scrapeXraySysMetrics(ctx context.Context, ch chan<- prometheus.Metric, client command.StatsServiceClient) error {
-	resp, err := client.GetSysStats(ctx, &command.SysStatsRequest{})
-	if err != nil {
-		return fmt.Errorf("failed to get sys stats: %w", err)
-	}
-
-	e.registerConstMetricGauge(ch, "uptime_seconds", float64(resp.GetUptime()))
-
-	// We followed the naming style of Go collector from Prometheus.
-	// See: https://github.com/prometheus/client_golang/blob/master/prometheus/go_collector.go
-	e.registerConstMetricGauge(ch, "goroutines", float64(resp.GetNumGoroutine()))
-	e.registerConstMetricGauge(ch, "memstats_alloc_bytes", float64(resp.GetAlloc()))
-	e.registerConstMetricGauge(ch, "memstats_alloc_bytes_total", float64(resp.GetTotalAlloc()))
-	e.registerConstMetricGauge(ch, "memstats_sys_bytes", float64(resp.GetSys()))
-	e.registerConstMetricGauge(ch, "memstats_mallocs_total", float64(resp.GetMallocs()))
-	e.registerConstMetricGauge(ch, "memstats_frees_total", float64(resp.GetFrees()))
-
-	// The metric live_objects was removed. You may calculate it in Prometheus using:
-	// memstats_live_objects_total = memstats_mallocs_total - memstats_frees_total
-	// See: https://prometheus.io/docs/instrumenting/writing_exporters/#drop-less-useful-statistics
-
-	// These metrics below are not directly exposed by Go collector.
-	// Therefore, we only add the "memstats_" prefix without changing their original names.
-	e.registerConstMetricGauge(ch, "memstats_num_gc", float64(resp.GetNumGC()))
-	e.registerConstMetricGauge(ch, "memstats_pause_total_ns", float64(resp.GetPauseTotalNs()))
-
-	return nil
-}
-
-func (e *Exporter) registerConstMetricGauge(ch chan<- prometheus.Metric, metric string, val float64, labels ...string) {
-	e.registerConstMetric(ch, metric, val, prometheus.GaugeValue, labels...)
-}
-
-func (e *Exporter) registerConstMetricCounter(ch chan<- prometheus.Metric, metric string, val float64, labels ...string) {
-	e.registerConstMetric(ch, metric, val, prometheus.CounterValue, labels...)
-}
-
-func (e *Exporter) registerConstMetric(ch chan<- prometheus.Metric, metric string, val float64, valType prometheus.ValueType, labelValues ...string) {
-	descr := e.metricDescriptions[metric]
-	if descr == nil {
-		descr = e.newMetricDescr(metric, metric+" metric", nil)
-	}
-
-	if m, err := prometheus.NewConstMetric(descr, valType, val, labelValues...); err == nil {
-		ch <- m
-	} else {
-		logrus.Debugf("NewConstMetric() err: %s", err)
-	}
-}
-
-func (e *Exporter) newMetricDescr(metricName string, docString string, labels []string) *prometheus.Desc {
-	return prometheus.NewDesc(prometheus.BuildFQName(namespace, "", metricName), docString, labels, nil)
+	return err == nil
 }

@@ -8,9 +8,10 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	"github.com/v2fly/v2ray-core/v4/app/stats/command"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/test/bufconn"
+
+	"github.com/samssh/xray-exporter/internal/xrayapi/app/stats/command"
 )
 
 type fakeStatsServer struct {
@@ -26,22 +27,23 @@ func (s *fakeStatsServer) GetSysStats(context.Context, *command.SysStatsRequest)
 	return &command.SysStatsResponse{Uptime: 42, NumGoroutine: 7}, nil
 }
 
-// newTestExporter starts an in-process gRPC server backed by srv and returns
-// an exporter connected to it. A nil srv simulates Xray being unreachable.
-func newTestExporter(t *testing.T, srv command.StatsServiceServer) *Exporter {
+// newTestExporter starts an in-process gRPC server and returns an exporter
+// connected to it. register adds services to the server; a nil register
+// simulates Xray being unreachable.
+func newTestExporter(t *testing.T, register func(*grpc.Server), collectors ...string) *Exporter {
 	t.Helper()
 
 	lis := bufconn.Listen(1 << 20)
-	if srv != nil {
+	if register != nil {
 		s := grpc.NewServer()
-		command.RegisterStatsServiceServer(s, srv)
+		register(s)
 		go func() { _ = s.Serve(lis) }()
 		t.Cleanup(s.Stop)
 	} else {
 		_ = lis.Close()
 	}
 
-	e, err := NewExporter("passthrough:///bufnet", time.Second,
+	e, err := NewExporter("passthrough:///bufnet", time.Second, collectors,
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			return lis.DialContext(ctx)
 		}),
@@ -54,22 +56,31 @@ func newTestExporter(t *testing.T, srv command.StatsServiceServer) *Exporter {
 	return e
 }
 
+func withStats(srv command.StatsServiceServer) func(*grpc.Server) {
+	return func(s *grpc.Server) { command.RegisterStatsServiceServer(s, srv) }
+}
+
 func TestCollect(t *testing.T) {
-	e := newTestExporter(t, &fakeStatsServer{stats: []*command.Stat{
+	e := newTestExporter(t, withStats(&fakeStatsServer{stats: []*command.Stat{
 		{Name: "inbound>>>vless-in>>>traffic>>>uplink", Value: 100},
 		{Name: "user>>>foo@example.com>>>traffic>>>downlink", Value: 200},
-		// Names that don't have four parts must be skipped, not panic.
+		// Names that aren't traffic counters must be skipped, not panic.
 		{Name: "user>>>foo@example.com>>>online", Value: 1},
-	}})
+		{Name: "inbound>>>vless-in>>>something>>>else", Value: 1},
+	}}), "traffic", "runtime")
 
 	expected := `
+# HELP xray_collector_up Whether the collector succeeded
+# TYPE xray_collector_up gauge
+xray_collector_up{collector="runtime"} 1
+xray_collector_up{collector="traffic"} 1
 # HELP xray_traffic_downlink_bytes_total Number of received bytes
 # TYPE xray_traffic_downlink_bytes_total counter
 xray_traffic_downlink_bytes_total{dimension="user",target="foo@example.com"} 200
 # HELP xray_traffic_uplink_bytes_total Number of transmitted bytes
 # TYPE xray_traffic_uplink_bytes_total counter
 xray_traffic_uplink_bytes_total{dimension="inbound",target="vless-in"} 100
-# HELP xray_up Indicate scrape succeeded or not
+# HELP xray_up Whether all enabled collectors succeeded
 # TYPE xray_up gauge
 xray_up 1
 # HELP xray_uptime_seconds Xray uptime in seconds
@@ -77,21 +88,74 @@ xray_up 1
 xray_uptime_seconds 42
 `
 	err := testutil.GatherAndCompare(e.registry, strings.NewReader(expected),
-		"xray_traffic_downlink_bytes_total", "xray_traffic_uplink_bytes_total", "xray_up", "xray_uptime_seconds")
+		"xray_collector_up", "xray_traffic_downlink_bytes_total", "xray_traffic_uplink_bytes_total", "xray_up", "xray_uptime_seconds")
 	if err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestCollectWhenXrayIsDown(t *testing.T) {
-	e := newTestExporter(t, nil)
+func TestCollectOnlyEnabledCollectors(t *testing.T) {
+	e := newTestExporter(t, withStats(&fakeStatsServer{}), "runtime")
 
 	expected := `
-# HELP xray_up Indicate scrape succeeded or not
+# HELP xray_collector_up Whether the collector succeeded
+# TYPE xray_collector_up gauge
+xray_collector_up{collector="runtime"} 1
+`
+	if err := testutil.GatherAndCompare(e.registry, strings.NewReader(expected), "xray_collector_up"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCollectWhenServiceIsMissing(t *testing.T) {
+	// The server is reachable but doesn't serve StatsService, like an Xray
+	// whose api.services doesn't list it.
+	e := newTestExporter(t, func(*grpc.Server) {}, "traffic")
+
+	expected := `
+# HELP xray_collector_up Whether the collector succeeded
+# TYPE xray_collector_up gauge
+xray_collector_up{collector="traffic"} 0
+# HELP xray_up Whether all enabled collectors succeeded
+# TYPE xray_up gauge
+xray_up 0
+`
+	if err := testutil.GatherAndCompare(e.registry, strings.NewReader(expected), "xray_collector_up", "xray_up"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCollectWhenXrayIsDown(t *testing.T) {
+	e := newTestExporter(t, nil, "traffic", "runtime")
+
+	expected := `
+# HELP xray_up Whether all enabled collectors succeeded
 # TYPE xray_up gauge
 xray_up 0
 `
 	if err := testutil.GatherAndCompare(e.registry, strings.NewReader(expected), "xray_up"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUnknownCollector(t *testing.T) {
+	if _, err := NewExporter("127.0.0.1:1", time.Second, []string{"nope"}); err == nil {
+		t.Fatal("expected an error for an unknown collector")
+	}
+}
+
+// Every collector must describe all the metrics it sends, or the registry
+// rejects them at scrape time.
+func TestAllCollectorsDescribeTheirMetrics(t *testing.T) {
+	var all []string
+	for _, c := range collectors {
+		all = append(all, c.name)
+	}
+	e := newTestExporter(t, withStats(&fakeStatsServer{stats: []*command.Stat{
+		{Name: "outbound>>>direct>>>traffic>>>uplink", Value: 1},
+	}}), all...)
+
+	if _, err := e.registry.Gather(); err != nil {
 		t.Fatal(err)
 	}
 }
