@@ -9,6 +9,8 @@ import (
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
+
+	"github.com/samssh/xray-exporter/internal/collector"
 )
 
 var (
@@ -16,14 +18,6 @@ var (
 	buildCommit  = "none"
 	buildDate    = "unknown"
 )
-
-var exporter *Exporter
-
-func scrapeHandler(w http.ResponseWriter, r *http.Request) {
-	promhttp.HandlerFor(
-		exporter.registry, promhttp.HandlerOpts{ErrorHandling: promhttp.ContinueOnError},
-	).ServeHTTP(w, r)
-}
 
 func main() {
 	app := kingpin.New("xray-exporter", "A Prometheus exporter for Xray-core metrics.")
@@ -42,12 +36,12 @@ func main() {
 		Default("info").Enum("debug", "info", "warn", "error")
 
 	collectorFlags := map[string]*bool{}
-	for _, c := range collectors {
+	for _, c := range collector.All() {
 		def := "false"
-		if c.enabledByDefault {
+		if c.EnabledByDefault {
 			def = "true"
 		}
-		collectorFlags[c.name] = app.Flag("collector."+c.name, fmt.Sprintf("Enable the %s collector: %s (default: %s)", c.name, c.help, def)).
+		collectorFlags[c.Name] = app.Flag("collector."+c.Name, fmt.Sprintf("Enable the %s collector: %s (default: %s)", c.Name, c.Help, def)).
 			Default(def).Bool()
 	}
 
@@ -59,22 +53,24 @@ func main() {
 	fmt.Printf("Xray Exporter %v-%v (built %v)\n", buildVersion, buildCommit, buildDate)
 
 	var enabled []string
-	for _, c := range collectors {
-		if *collectorFlags[c.name] {
-			enabled = append(enabled, c.name)
+	for _, c := range collector.All() {
+		if *collectorFlags[c.Name] {
+			enabled = append(enabled, c.Name)
 		}
 	}
 	logrus.Infof("Enabled collectors: %v", enabled)
 
-	var err error
-	scrapeTimeout := time.Duration(*scrapeTimeoutInSeconds) * time.Second
-	exporter, err = NewExporter(*endpoint, scrapeTimeout, enabled)
+	exporter, err := collector.New(collector.Options{
+		Endpoint:      *endpoint,
+		ScrapeTimeout: time.Duration(*scrapeTimeoutInSeconds) * time.Second,
+		Collectors:    enabled,
+	})
 	if err != nil {
 		logrus.Fatal(err)
 	}
 
 	http.Handle("/metrics", promhttp.Handler())
-	http.HandleFunc(*metricsPath, scrapeHandler)
+	http.Handle(*metricsPath, exporter.Handler())
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		_, err := w.Write([]byte(`<html>
 <head><title>Xray Exporter</title></head>

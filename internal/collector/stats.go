@@ -1,4 +1,4 @@
-package main
+package collector
 
 import (
 	"context"
@@ -22,12 +22,12 @@ type trafficCollector struct {
 	downlink *prometheus.Desc
 }
 
-func newTrafficCollector(conn *grpc.ClientConn) collector {
+func newTrafficCollector(conn *grpc.ClientConn, _ Options) (collector, error) {
 	return &trafficCollector{
 		client:   command.NewStatsServiceClient(conn),
 		uplink:   newDesc("traffic_uplink_bytes_total", "Number of transmitted bytes", "dimension", "target"),
 		downlink: newDesc("traffic_downlink_bytes_total", "Number of received bytes", "dimension", "target"),
-	}
+	}, nil
 }
 
 func (c *trafficCollector) Describe(ch chan<- *prometheus.Desc) {
@@ -71,7 +71,7 @@ type runtimeCollector struct {
 	descs  map[string]*prometheus.Desc
 }
 
-func newRuntimeCollector(conn *grpc.ClientConn) collector {
+func newRuntimeCollector(conn *grpc.ClientConn, _ Options) (collector, error) {
 	c := &runtimeCollector{
 		client: command.NewStatsServiceClient(conn),
 		descs:  map[string]*prometheus.Desc{},
@@ -94,7 +94,7 @@ func newRuntimeCollector(conn *grpc.ClientConn) collector {
 		c.descs[name] = newDesc(name, help)
 	}
 
-	return c
+	return c, nil
 }
 
 func (c *runtimeCollector) Describe(ch chan<- *prometheus.Desc) {

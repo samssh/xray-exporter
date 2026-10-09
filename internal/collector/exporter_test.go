@@ -1,4 +1,4 @@
-package main
+package collector
 
 import (
 	"context"
@@ -28,9 +28,9 @@ func (s *fakeStatsServer) GetSysStats(context.Context, *command.SysStatsRequest)
 }
 
 // newTestExporter starts an in-process gRPC server and returns an exporter
-// connected to it. register adds services to the server; a nil register
-// simulates Xray being unreachable.
-func newTestExporter(t *testing.T, register func(*grpc.Server), collectors ...string) *Exporter {
+// connected to it with opts. register adds services to the server; a nil
+// register simulates Xray being unreachable.
+func newTestExporter(t *testing.T, register func(*grpc.Server), opts Options) *Exporter {
 	t.Helper()
 
 	lis := bufconn.Listen(1 << 20)
@@ -43,11 +43,14 @@ func newTestExporter(t *testing.T, register func(*grpc.Server), collectors ...st
 		_ = lis.Close()
 	}
 
-	e, err := NewExporter("passthrough:///bufnet", time.Second, collectors,
+	opts.Endpoint = "passthrough:///bufnet"
+	opts.ScrapeTimeout = time.Second
+	opts.DialOptions = []grpc.DialOption{
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			return lis.DialContext(ctx)
 		}),
-	)
+	}
+	e, err := New(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +70,7 @@ func TestCollect(t *testing.T) {
 		// Names that aren't traffic counters must be skipped, not panic.
 		{Name: "user>>>foo@example.com>>>online", Value: 1},
 		{Name: "inbound>>>vless-in>>>something>>>else", Value: 1},
-	}}), "traffic", "runtime")
+	}}), Options{Collectors: []string{"traffic", "runtime"}})
 
 	expected := `
 # HELP xray_collector_up Whether the collector succeeded
@@ -95,7 +98,7 @@ xray_uptime_seconds 42
 }
 
 func TestCollectOnlyEnabledCollectors(t *testing.T) {
-	e := newTestExporter(t, withStats(&fakeStatsServer{}), "runtime")
+	e := newTestExporter(t, withStats(&fakeStatsServer{}), Options{Collectors: []string{"runtime"}})
 
 	expected := `
 # HELP xray_collector_up Whether the collector succeeded
@@ -110,7 +113,7 @@ xray_collector_up{collector="runtime"} 1
 func TestCollectWhenServiceIsMissing(t *testing.T) {
 	// The server is reachable but doesn't serve StatsService, like an Xray
 	// whose api.services doesn't list it.
-	e := newTestExporter(t, func(*grpc.Server) {}, "traffic")
+	e := newTestExporter(t, func(*grpc.Server) {}, Options{Collectors: []string{"traffic"}})
 
 	expected := `
 # HELP xray_collector_up Whether the collector succeeded
@@ -126,7 +129,7 @@ xray_up 0
 }
 
 func TestCollectWhenXrayIsDown(t *testing.T) {
-	e := newTestExporter(t, nil, "traffic", "runtime")
+	e := newTestExporter(t, nil, Options{Collectors: []string{"traffic", "runtime"}})
 
 	expected := `
 # HELP xray_up Whether all enabled collectors succeeded
@@ -139,7 +142,7 @@ xray_up 0
 }
 
 func TestUnknownCollector(t *testing.T) {
-	if _, err := NewExporter("127.0.0.1:1", time.Second, []string{"nope"}); err == nil {
+	if _, err := New(Options{Endpoint: "127.0.0.1:1", Collectors: []string{"nope"}}); err == nil {
 		t.Fatal("expected an error for an unknown collector")
 	}
 }
@@ -149,11 +152,11 @@ func TestUnknownCollector(t *testing.T) {
 func TestAllCollectorsDescribeTheirMetrics(t *testing.T) {
 	var all []string
 	for _, c := range collectors {
-		all = append(all, c.name)
+		all = append(all, c.Name)
 	}
 	e := newTestExporter(t, withStats(&fakeStatsServer{stats: []*command.Stat{
 		{Name: "outbound>>>direct>>>traffic>>>uplink", Value: 1},
-	}}), all...)
+	}}), Options{Collectors: all})
 
 	if _, err := e.registry.Gather(); err != nil {
 		t.Fatal(err)
