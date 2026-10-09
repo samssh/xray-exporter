@@ -1,4 +1,5 @@
-FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
+# Pulled through Google's Docker Hub mirror, which avoids Docker Hub rate limits in CI.
+FROM --platform=$BUILDPLATFORM mirror.gcr.io/library/golang:1.27-alpine AS build
 
 ARG TARGETOS TARGETARCH
 ARG VERSION=dev COMMIT=none DATE=unknown
