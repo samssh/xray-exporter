@@ -3,17 +3,19 @@ package main
 import (
 	"context"
 	"fmt"
-	"google.golang.org/grpc/credentials/insecure"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/v2fly/v2ray-core/v4/app/stats/command"
-
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
+	// Xray also serves StatsService under its old V2Ray name, so the v2fly stubs work against it.
+	"github.com/v2fly/v2ray-core/v4/app/stats/command"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
+
+const namespace = "xray"
 
 type Exporter struct {
 	sync.Mutex
@@ -25,14 +27,16 @@ type Exporter struct {
 	conn               *grpc.ClientConn
 }
 
-func NewExporter(endpoint string, scrapeTimeout time.Duration) (*Exporter, error) {
+// NewExporter creates an exporter for the Xray API at endpoint. The gRPC
+// connection is established lazily, so Xray does not need to be running yet.
+func NewExporter(endpoint string, scrapeTimeout time.Duration, dialOpts ...grpc.DialOption) (*Exporter, error) {
 	e := Exporter{
 		endpoint:      endpoint,
 		scrapeTimeout: scrapeTimeout,
 		registry:      prometheus.NewRegistry(),
 
 		totalScrapes: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: "v2ray",
+			Namespace: namespace,
 			Name:      "scrapes_total",
 			Help:      "Total number of scrapes performed",
 		}),
@@ -46,27 +50,28 @@ func NewExporter(endpoint string, scrapeTimeout time.Duration) (*Exporter, error
 	}{
 		"up":                           {txt: "Indicate scrape succeeded or not"},
 		"scrape_duration_seconds":      {txt: "Scrape duration in seconds"},
-		"uptime_seconds":               {txt: "V2Ray uptime in seconds"},
+		"uptime_seconds":               {txt: "Xray uptime in seconds"},
 		"traffic_uplink_bytes_total":   {txt: "Number of transmitted bytes", lbls: []string{"dimension", "target"}},
 		"traffic_downlink_bytes_total": {txt: "Number of received bytes", lbls: []string{"dimension", "target"}},
 	} {
 		e.metricDescriptions[k] = e.newMetricDescr(k, desc.txt, desc.lbls)
 	}
 
-	e.registry.MustRegister(&e)
-
-	ctx, cancel := context.WithTimeout(context.Background(), scrapeTimeout)
-	defer cancel()
-
-	conn, err := grpc.DialContext(ctx, endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	dialOpts = append([]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, dialOpts...)
+	conn, err := grpc.NewClient(endpoint, dialOpts...)
 	if err != nil {
-		logrus.Fatal(fmt.Errorf("failed to dial: %w, timeout: %v", err, e.scrapeTimeout))
-		return nil, err
+		return nil, fmt.Errorf("failed to create gRPC client for %q: %w", endpoint, err)
 	}
-
 	e.conn = conn
 
+	e.registry.MustRegister(&e)
+
 	return &e, nil
+}
+
+// Close releases the underlying gRPC connection.
+func (e *Exporter) Close() error {
+	return e.conn.Close()
 }
 
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
@@ -77,7 +82,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	start := time.Now().UnixNano()
 
 	var up float64 = 1
-	if err := e.scrapeV2Ray(ch); err != nil {
+	if err := e.scrapeXray(ch); err != nil {
 		up = 0
 		logrus.Warnf("Scrape failed: %s", err)
 	}
@@ -96,21 +101,24 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	ch <- e.totalScrapes.Desc()
 }
 
-func (e *Exporter) scrapeV2Ray(ch chan<- prometheus.Metric) error {
+func (e *Exporter) scrapeXray(ch chan<- prometheus.Metric) error {
+	ctx, cancel := context.WithTimeout(context.Background(), e.scrapeTimeout)
+	defer cancel()
+
 	client := command.NewStatsServiceClient(e.conn)
 
-	if err := e.scrapeV2RaySysMetrics(context.Background(), ch, client); err != nil {
+	if err := e.scrapeXraySysMetrics(ctx, ch, client); err != nil {
 		return err
 	}
 
-	if err := e.scrapeV2RayMetrics(context.Background(), ch, client); err != nil {
+	if err := e.scrapeXrayMetrics(ctx, ch, client); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (e *Exporter) scrapeV2RayMetrics(ctx context.Context, ch chan<- prometheus.Metric, client command.StatsServiceClient) error {
+func (e *Exporter) scrapeXrayMetrics(ctx context.Context, ch chan<- prometheus.Metric, client command.StatsServiceClient) error {
 	resp, err := client.QueryStats(ctx, &command.QueryStatsRequest{Reset_: false})
 	if err != nil {
 		return fmt.Errorf("failed to get stats: %w", err)
@@ -119,6 +127,10 @@ func (e *Exporter) scrapeV2RayMetrics(ctx context.Context, ch chan<- prometheus.
 	for _, s := range resp.GetStat() {
 		// example value: inbound>>>socks-proxy>>>traffic>>>uplink
 		p := strings.Split(s.GetName(), ">>>")
+		if len(p) != 4 {
+			logrus.Debugf("Skipping stat with unexpected name: %q", s.GetName())
+			continue
+		}
 		metric := p[2] + "_" + p[3] + "_bytes_total"
 		dimension := p[0]
 		target := p[1]
@@ -129,7 +141,7 @@ func (e *Exporter) scrapeV2RayMetrics(ctx context.Context, ch chan<- prometheus.
 	return nil
 }
 
-func (e *Exporter) scrapeV2RaySysMetrics(ctx context.Context, ch chan<- prometheus.Metric, client command.StatsServiceClient) error {
+func (e *Exporter) scrapeXraySysMetrics(ctx context.Context, ch chan<- prometheus.Metric, client command.StatsServiceClient) error {
 	resp, err := client.GetSysStats(ctx, &command.SysStatsRequest{})
 	if err != nil {
 		return fmt.Errorf("failed to get sys stats: %w", err)
@@ -180,5 +192,5 @@ func (e *Exporter) registerConstMetric(ch chan<- prometheus.Metric, metric strin
 }
 
 func (e *Exporter) newMetricDescr(metricName string, docString string, labels []string) *prometheus.Desc {
-	return prometheus.NewDesc(prometheus.BuildFQName("v2ray", "", metricName), docString, labels, nil)
+	return prometheus.NewDesc(prometheus.BuildFQName(namespace, "", metricName), docString, labels, nil)
 }
