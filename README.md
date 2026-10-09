@@ -26,7 +26,7 @@ This project started as a fork of [wi1dcard/v2ray-exporter][upstream].
 [stats-api]: https://xtls.github.io/en/config/stats.html
 [upstream]: https://github.com/wi1dcard/v2ray-exporter
 [ci]: https://github.com/samssh/xray-exporter/actions/workflows/ci.yml
-[grafana-screenshot]: https://i.loli.net/2020/06/12/KzjOnyu93VEIPiW.png
+[grafana-screenshot]: ./docs/images/dashboard.jpg
 
 ## Quick Start
 
@@ -53,7 +53,17 @@ Tags: `latest` and `X.Y.Z` / `X.Y` follow releases, and `master` is built from t
 
 ### Grafana Dashboard
 
-A simple Grafana dashboard is available [here][grafana-dashboard]. Please refer to the [Grafana docs][grafana-importing-dashboard] for how to import dashboards from JSON files.
+A Grafana dashboard is available in [`grafana/xray-dashboard.json`][grafana-dashboard]. It is built for and tested with Grafana 12. Import it as described in the [Grafana docs][grafana-importing-dashboard], then pick your Prometheus data source from the **Data source** drop-down at the top.
+
+It has these sections:
+
+- **Overview**: instance status, online users, traffic, bandwidth, uptime and failing collectors.
+- **Traffic by inbound / outbound / user**: a usage table for the selected time range and speed graphs, repeated for each dimension.
+- **Users**: online users and IPs, and configured users per inbound.
+- **Outbounds**: outbound health, probe delay, protocols and balancer selection.
+- **Xray runtime** and **Exporter** (collapsed): memory, goroutines, GC, and collector status.
+
+Panels for collectors that are off by default show no data until you enable those collectors (see [Collectors](#collectors)).
 
 ## Tutorial
 
@@ -363,5 +373,5 @@ MIT, except for the files in [`proto/`](proto) and [`internal/xrayapi/`](interna
 [xray-burst-observatory-docs]: https://xtls.github.io/en/config/observatory.html#burstobservatoryobject
 [prometheus-docs]: https://prometheus.io/docs/prometheus/latest/configuration/configuration/
 [prometheus-naming]: https://prometheus.io/docs/practices/naming/
-[grafana-dashboard]: ./dashboard.json
+[grafana-dashboard]: ./grafana/xray-dashboard.json
 [grafana-importing-dashboard]: https://grafana.com/docs/grafana/latest/dashboards/build-dashboards/import-dashboards/
